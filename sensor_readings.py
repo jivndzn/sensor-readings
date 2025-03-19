@@ -2,142 +2,166 @@ import serial
 import requests
 import time
 import json
+from datetime import datetime
+from typing import Dict, Any, Optional
+import pytz
 
-# ========== 1) Supabase Info ==========
-supabase_url = "https://exkuzazecthqeoogpsfn.supabase.co/rest/v1/sensor_readings"
-supabase_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4a3V6YXplY3RocWVvb2dwc2ZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIyOTIzOTUsImV4cCI6MjA1Nzg2ODM5NX0.f8-TBMIsFDv773uNzRNxycJyVgZY4vIRANLxsol0y5Y"
+# Supabase configuration
+SUPABASE_URL = "https://exkuzazecthqeoogpsfn.supabase.co/rest/v1/sensor_readings"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4a3V6YXplY3RocWVvb2dwc2ZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIyOTIzOTUsImV4cCI6MjA1Nzg2ODM5NX0.f8-TBMIsFDv773uNzRNxycJyVgZY4vIRANLxsol0y5Y"
 
-headers = {
-    "Content-Type": "application/json",
-    "apikey": supabase_key,
-    "Authorization": f"Bearer {supabase_key}",
-    "Prefer": "return=minimal"  # Don't return the inserted row
-}
+PH_TZ = pytz.timezone('Asia/Manila')
 
-# ========== 2) Serial Port Setup ==========
-SERIAL_PORT = "COM8"  # Updated to match your detected port
-BAUD_RATE = 9600
-
-# Try to automatically find the Arduino port
-try:
-    import serial.tools.list_ports
-    auto_port = find_arduino_port()
-    if auto_port:
-        SERIAL_PORT = auto_port
-        print(f"Automatically detected Arduino at {SERIAL_PORT}")
-except ImportError:
-    print("Serial port tools not available. Using configured port.")
-
-# Open the serial port with proper resource management
-ser = None
-try:
-    # First check if port is already open
-    try:
-        test_port = serial.Serial(SERIAL_PORT)
-        test_port.close()
-    except serial.SerialException:
-        pass  # Port is available
+class SensorDataCollector:
+    def __init__(self):
+        self.headers = {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Prefer": "return=minimal"
+        }
+        self.buffer = []
+        self.max_retries = 3
+        self.retry_delay = 5  # seconds
         
-    # Now try to open it for our use
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
-    time.sleep(2)  # Wait for Arduino to reset after connection
-    
-except serial.SerialException as e:
-    print(f"Error opening serial port {SERIAL_PORT}: {e}")
-    print("Troubleshooting steps:")
-    print("1. Make sure no other program is using the port")
-    print("2. Run the script as administrator")
-    print("3. Verify the correct COM port in Device Manager")
-    print("4. Try unplugging and replugging the Arduino")
-    if ser:
-        ser.close()
-    exit(1)
-
-# ========== 3) Read & Upload Loop ==========
-reading_buffer = []  # Store readings in case of connection issues
-MAX_BUFFER_SIZE = 10  # Maximum number of readings to store before trying to send again
-
-print("Waiting for data from Arduino...")
-
-while True:
-    try:
-        # Read one line from the serial port
-        line = ser.readline().decode('utf-8', errors='replace').strip()
-        
-        # Skip empty lines or debug output (which contains characters like ':')
-        if not line or ":" in line:
-            continue
-            
-        # Try to parse CSV: "temperature,ph,quality"
+    def test_connection(self) -> bool:
+        """Test the Supabase connection before starting data collection."""
         try:
-            values = line.split(",")
-            if len(values) == 3:
-                temperature = float(values[0])
-                ph = float(values[1])
-                quality = float(values[2])
+            # Try a GET request first to verify connection
+            response = requests.get(
+                SUPABASE_URL,
+                headers=self.headers,
+                timeout=5,
+                params={'select': 'created_at', 'limit': 1}
+            )
+            if response.status_code == 200:
+                print("✓ Supabase connection test successful")
+                return True
+            else:
+                print(f"× Supabase connection test failed: Status {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+        except requests.RequestException as e:
+            print(f"× Supabase connection test failed: {str(e)}")
+            return False
+
+    def send_to_supabase(self, payload: Dict[str, Any]) -> bool:
+        """Send data to Supabase with retries."""
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    SUPABASE_URL,
+                    json=payload,
+                    headers=self.headers,
+                    timeout=5
+                )
                 
-                # Basic validation
-                if -20 <= temperature <= 100 and 0 <= ph <= 14 and 0 <= quality <= 100:
-                    data_source = "arduino_uno"
+                if response.status_code in (200, 201):
+                    return True
                     
-                    # Prepare JSON payload
+                print(f"× Attempt {attempt + 1}/{self.max_retries} failed:")
+                print(f"  Status Code: {response.status_code}")
+                print(f"  Response: {response.text}")
+                
+                if response.status_code == 401:
+                    print("× Authentication error. Please check your Supabase API key.")
+                    return False
+                elif response.status_code == 403:
+                    print("× Permission denied. Please check your API key permissions.")
+                    return False
+                elif response.status_code == 404:
+                    print("× API endpoint not found. Please check your Supabase URL.")
+                    return False
+                elif response.status_code == 422:
+                    print("× Invalid data format. Please check your payload structure.")
+                    print(f"  Payload: {json.dumps(payload, indent=2)}")
+                    return False
+                
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                    
+            except requests.exceptions.ConnectionError as e:
+                print(f"× Network connection error: {str(e)}")
+            except requests.exceptions.Timeout as e:
+                print(f"× Request timed out: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                print(f"× Request failed: {str(e)}")
+            
+            if attempt < self.max_retries - 1:
+                time.sleep(self.retry_delay)
+                
+        return False
+
+    def run(self):
+        """Main loop to collect and process sensor data."""
+        # Test connection before starting
+        if not self.test_connection():
+            print("Initial connection test failed. Please check your Supabase configuration.")
+            print("1. Verify your API key is correct")
+            print("2. Check your network connection")
+            print("3. Verify the Supabase service is running")
+            print("4. Confirm your database permissions")
+            return
+
+        try:
+            ser = serial.Serial('COM8', 9600, timeout=1)
+            print(f"Connected to Arduino on COM8")
+            
+            while True:
+                try:
+                    line = ser.readline().decode('utf-8', errors='replace').strip()
+                    
+                    if not line or ":" in line:
+                        continue
+                        
+                    values = line.split(",")
+                    if len(values) != 3:
+                        continue
+                        
+                    temperature, ph, quality = map(float, values)
+                    
+                    # Create payload
                     payload = {
                         "temperature": temperature,
                         "pH": ph,
                         "quality": quality,
-                        "data_source": data_source
+                        "data_source": "arduino_uno",
+                        "created_at": datetime.now(PH_TZ).strftime('%Y-%m-%d %H:%M:%S')
                     }
                     
-                    print(f"Received valid data: Temp={temperature}°C, pH={ph}, Quality={quality}")
+                    print(f"Attempting to send: {json.dumps(payload, indent=2)}")
                     
-                    # Try to send to Supabase
-                    try:
-                        response = requests.post(supabase_url, json=payload, headers=headers, timeout=5)
+                    if not self.send_to_supabase(payload):
+                        print("× Adding to buffer for retry later")
+                        self.buffer.append(payload)
+                        print(f"Buffer size: {len(self.buffer)} readings")
+                    else:
+                        print("✓ Data successfully sent to Supabase")
                         
-                        if response.status_code in (200, 201):
-                            print(f"✓ Data successfully inserted into Supabase")
-                            
-                            # If we had buffered readings, try to send them now
-                            if reading_buffer:
-                                print(f"Attempting to send {len(reading_buffer)} buffered readings...")
-                                for buffered_payload in reading_buffer[:]:  # Use a copy for iteration
-                                    try:
-                                        buffer_response = requests.post(supabase_url, json=buffered_payload, headers=headers, timeout=5)
-                                        if buffer_response.status_code in (200, 201):
-                                            reading_buffer.remove(buffered_payload)
-                                            print(f"✓ Buffered reading sent successfully")
-                                        else:
-                                            print(f"× Failed to send buffered reading: {buffer_response.status_code}")
-                                    except requests.RequestException:
-                                        # Keep it in buffer
-                                        pass
-                        else:
-                            print(f"× Insert failed ({response.status_code}): {response.text}")
-                            # Buffer the reading for later
-                            reading_buffer.append(payload)
-                            if len(reading_buffer) > MAX_BUFFER_SIZE:
-                                reading_buffer.pop(0)  # Remove oldest if buffer is full
-                            
-                    except requests.RequestException as e:
-                        print(f"× Network error: {e}")
-                        # Buffer the reading for later
-                        reading_buffer.append(payload)
-                        if len(reading_buffer) > MAX_BUFFER_SIZE:
-                            reading_buffer.pop(0)  # Remove oldest if buffer is full
-                else:
-                    print(f"× Invalid data range: Temp={temperature}°C, pH={ph}, Quality={quality}")
-            else:
-                # Skip lines that aren't valid data
-                pass
+                    # Try to send buffered readings
+                    if self.buffer:
+                        print(f"Attempting to send {len(self.buffer)} buffered readings...")
+                        successful_sends = []
+                        for reading in self.buffer:
+                            if self.send_to_supabase(reading):
+                                successful_sends.append(reading)
+                        
+                        # Remove successful sends from buffer
+                        self.buffer = [r for r in self.buffer if r not in successful_sends]
+                        
+                except ValueError as e:
+                    print(f"× Error parsing data: {str(e)}")
+                except Exception as e:
+                    print(f"× Unexpected error: {str(e)}")
                 
-        except ValueError as e:
-            # Not valid CSV data, probably debug output or malformed line
-            pass
+                time.sleep(30 * 60)  # 30 minute delay
                 
-    except Exception as e:
-        print(f"× Error: {e}")
+        except serial.SerialException as e:
+            print(f"× Error with serial connection: {str(e)}")
+        finally:
+            if 'ser' in locals():
+                ser.close()
 
-    # Short delay
-    time.sleep(0.1)
-    
+if __name__ == "__main__":
+    collector = SensorDataCollector()
+    collector.run()
