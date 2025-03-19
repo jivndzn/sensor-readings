@@ -15,26 +15,8 @@ headers = {
 }
 
 # ========== 2) Serial Port Setup ==========
-# Change SERIAL_PORT to match your system.
-# Windows might be "COM3", macOS might be "/dev/tty.usbmodem*", Linux might be "/dev/ttyUSB0" or "/dev/ttyACM0"
-SERIAL_PORT = "COM3"  # Change this to match your Arduino port
+SERIAL_PORT = "COM8"  # Updated to match your detected port
 BAUD_RATE = 9600
-
-# Function to find the correct serial port (useful for cross-platform support)
-def find_arduino_port():
-    import serial.tools.list_ports
-    
-    ports = list(serial.tools.list_ports.comports())
-    if not ports:
-        return None
-    
-    # Try to find an Arduino port
-    for port in ports:
-        if "Arduino" in port.description or "CH340" in port.description or "USB Serial" in port.description:
-            return port.device
-    
-    # If no Arduino port found, return the first available port
-    return ports[0].device
 
 # Try to automatically find the Arduino port
 try:
@@ -46,14 +28,30 @@ try:
 except ImportError:
     print("Serial port tools not available. Using configured port.")
 
-# Open the serial port
+# Open the serial port with proper resource management
+ser = None
 try:
+    # First check if port is already open
+    try:
+        test_port = serial.Serial(SERIAL_PORT)
+        test_port.close()
+    except serial.SerialException:
+        pass  # Port is available
+        
+    # Now try to open it for our use
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
     time.sleep(2)  # Wait for Arduino to reset after connection
+    
 except serial.SerialException as e:
     print(f"Error opening serial port {SERIAL_PORT}: {e}")
-    print("Please check your connection and port settings.")
+    print("Troubleshooting steps:")
+    print("1. Make sure no other program is using the port")
+    print("2. Run the script as administrator")
+    print("3. Verify the correct COM port in Device Manager")
+    print("4. Try unplugging and replugging the Arduino")
+    if ser:
+        ser.close()
     exit(1)
 
 # ========== 3) Read & Upload Loop ==========
