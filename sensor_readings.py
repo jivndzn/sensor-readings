@@ -154,7 +154,7 @@ class SensorDataCollector:
                 except Exception as e:
                     print(f"× Unexpected error: {str(e)}")
                 
-                time.sleep(30 * 60)  # 30 minute delay
+                time.sleep(5 * 60)  # 5 minute delay
                 
         except serial.SerialException as e:
             print(f"× Error with serial connection: {str(e)}")
